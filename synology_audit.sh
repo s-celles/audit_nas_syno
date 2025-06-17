@@ -1,64 +1,4 @@
-# Fonction pour créer des fichiers markdown formatés
-create_markdown_file() {
-    local filename="$1"
-    local title="$2"
-    local content="$3"
-    
-    cat > "$AUDIT_DIR/$filename" << EOF
-# $title
-
-**Date de génération:** $(date)  
-**Hostname:** $(hostname)  
-**Système:** $(cat /proc/version 2>/dev/null | cut -d' ' -f1-3)
-
----
-
-$content
-
----
-
-*Généré automatiquement par l'audit Synology RS814+*
-EOF
-}
-
-# Fonction pour formater les informations système en markdown
-format_system_info_md() {
-    if [ -f "$AUDIT_DIR/synoinfo.conf.md" ]; then
-        local synology_model=$(grep "^productversion=" /etc/synoinfo.conf 2>/dev/null | cut -d'"' -f2)
-        local synology_build=$(grep "^buildnumber=" /etc/synoinfo.conf 2>/dev/null | cut -d'"' -f2)
-        
-        cat > "$AUDIT_DIR/system_summary.md" << EOF
-# Résumé Système Synology
-
-## 📋 Informations Générales
-
-| Propriété | Valeur |
-|-----------|--------|
-| **Modèle** | RS814+ |
-| **Version DSM** | $synology_model |
-| **Build** | $synology_build |
-| **Hostname** | $(hostname) |
-| **Uptime** | $(uptime | cut -d',' -f1) |
-| **Date audit** | $(date) |
-
-## 🖥️ Système
-
-$(cat /proc/version 2>/dev/null)
-
-## 💾 Mémoire
-
-\`\`\`
-$(free -h 2>/dev/null)
-\`\`\`
-
-## 🔧 Processeur
-
-$(grep "model name" /proc/cpuinfo 2>/dev/null | head -1 | cut -d':' -f2 | sed 's/^ *//')
-
-EOF
-        print_success "Résumé système -> system_summary.md"
-    fi
-}#!/bin/bash
+#!/bin/bash
 
 # =================================================================
 # Script d'audit complet Synology RS814+ pour migration UGREEN
@@ -146,6 +86,68 @@ EOF
 - Vérifier les permissions ou la syntaxe
 
 EOF
+    fi
+}
+
+# Fonction pour créer des fichiers markdown formatés
+create_markdown_file() {
+    local filename="$1"
+    local title="$2"
+    local content="$3"
+    
+    cat > "$AUDIT_DIR/$filename" << EOF
+# $title
+
+**Date de génération:** $(date)  
+**Hostname:** $(hostname)  
+**Système:** $(cat /proc/version 2>/dev/null | cut -d' ' -f1-3)
+
+---
+
+$content
+
+---
+
+*Généré automatiquement par l'audit Synology RS814+*
+EOF
+}
+
+# Fonction pour formater les informations système en markdown
+format_system_info_md() {
+    if [ -f "$AUDIT_DIR/synoinfo.conf.md" ]; then
+        local synology_model=$(grep "^productversion=" /etc/synoinfo.conf 2>/dev/null | cut -d'"' -f2)
+        local synology_build=$(grep "^buildnumber=" /etc/synoinfo.conf 2>/dev/null | cut -d'"' -f2)
+        
+        cat > "$AUDIT_DIR/system_summary.md" << EOF
+# Résumé Système Synology
+
+## 📋 Informations Générales
+
+| Propriété | Valeur |
+|-----------|--------|
+| **Modèle** | RS814+ |
+| **Version DSM** | $synology_model |
+| **Build** | $synology_build |
+| **Hostname** | $(hostname) |
+| **Uptime** | $(uptime | cut -d',' -f1) |
+| **Date audit** | $(date) |
+
+## 🖥️ Système
+
+$(cat /proc/version 2>/dev/null)
+
+## 💾 Mémoire
+
+\`\`\`
+$(free -h 2>/dev/null)
+\`\`\`
+
+## 🔧 Processeur
+
+$(grep "model name" /proc/cpuinfo 2>/dev/null | head -1 | cut -d':' -f2 | sed 's/^ *//')
+
+EOF
+        print_success "Résumé système -> system_summary.md"
     fi
 }
 
@@ -772,17 +774,27 @@ create_archive() {
         print_success "Archive créée: $PWD/$ARCHIVE_NAME"
         echo ""
         echo -e "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
-        echo -e "${GREEN}║                    AUDIT TERMINÉ AVEC SUCCÈS                ║${NC}"
+        echo -e "${GREEN}║                📋 AUDIT TERMINÉ AVEC SUCCÈS 📋              ║${NC}"
         echo -e "${GREEN}╠══════════════════════════════════════════════════════════════╣${NC}"
-        echo -e "${GREEN}║${NC} Archive finale: $ARCHIVE_NAME"
-        echo -e "${GREEN}║${NC} Dossier détail: $AUDIT_DIR/"
-        echo -e "${GREEN}║${NC} Rapport principal: $AUDIT_DIR/RAPPORT_AUDIT.txt"
+        echo -e "${GREEN}║${NC} 📦 Archive finale: $ARCHIVE_NAME"
+        echo -e "${GREEN}║${NC} 📁 Dossier détail: $AUDIT_DIR/"
+        echo -e "${GREEN}║${NC} 📋 Rapport principal: RAPPORT_AUDIT.md"
+        echo -e "${GREEN}║${NC} 📑 Index des fichiers: INDEX.md"
         echo -e "${GREEN}║${NC}"
-        echo -e "${GREEN}║${NC} Prochaines étapes:"
+        echo -e "${GREEN}║${NC} 🎯 Fichiers Markdown générés:"
+        echo -e "${GREEN}║${NC}    • 📊 Tableaux formatés"
+        echo -e "${GREEN}║${NC}    • 🎨 Mise en forme professionnelle"  
+        echo -e "${GREEN}║${NC}    • 📱 Compatible GitHub/GitLab"
+        echo -e "${GREEN}║${NC}"
+        echo -e "${GREEN}║${NC} 🚀 Prochaines étapes:"
         echo -e "${GREEN}║${NC} 1. Téléchargez l'archive sur votre PC"
-        echo -e "${GREEN}║${NC} 2. Consultez le rapport principal"
-        echo -e "${GREEN}║${NC} 3. Procédez à la configuration du DXP4800+"
+        echo -e "${GREEN}║${NC} 2. Consultez RAPPORT_AUDIT.md (rapport principal)"
+        echo -e "${GREEN}║${NC} 3. Vérifiez storage_summary.md (migration)"
+        echo -e "${GREEN}║${NC} 4. Consultez users_summary.md (comptes)"
+        echo -e "${GREEN}║${NC} 5. Procédez à la configuration du DXP4800+"
         echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
+        echo ""
+        echo -e "${BLUE}💡 Conseil:${NC} Utilisez un éditeur Markdown ou GitHub pour une lecture optimale"
     else
         print_error "Échec création archive"
     fi
