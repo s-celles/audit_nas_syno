@@ -38,16 +38,21 @@ print_error() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $1" >> "$AUDIT_DIR/$LOG_FILE"
 }
 
-# Fonction pour exécuter une commande avec gestion d'erreur
+# Fonction pour exécuter une commande avec gestion d'erreur et timeout
 execute_cmd() {
     local cmd="$1"
     local output_file="$2"
     local description="$3"
+    local timeout_sec="${4:-60}"  # Timeout par défaut: 60 secondes
     
     print_status "Collecte: $description"
     
-    if eval "$cmd" > "$AUDIT_DIR/$output_file" 2>/dev/null; then
+    # Utiliser timeout pour éviter les blocages
+    if timeout "$timeout_sec" bash -c "$cmd" > "$AUDIT_DIR/$output_file" 2>/dev/null; then
         print_success "$description -> $output_file"
+    elif [ $? -eq 124 ]; then
+        print_warning "Timeout ($timeout_sec s): $description"
+        echo "TIMEOUT: Commande trop longue ($cmd)" > "$AUDIT_DIR/$output_file"
     else
         print_warning "Échec: $description"
         echo "ERREUR: Impossible d'exécuter $cmd" > "$AUDIT_DIR/$output_file"
@@ -117,28 +122,74 @@ collect_hardware_info() {
     execute_cmd "fdisk -l" "hardware_fdisk.txt" "Table des partitions"
 }
 
-# Collecte des informations stockage
-collect_storage_info() {
-    print_status "=== COLLECTE INFORMATIONS STOCKAGE ==="
+# Collecte des informations stockage - VERSION RAPIDE
+collect_storage_info_fast() {
+    print_status "=== COLLECTE STOCKAGE (informations critiques) ==="
     
     execute_cmd "df -h" "storage_df.txt" "Espace disque"
     execute_cmd "cat /proc/mdstat" "storage_raid.txt" "Statut RAID"
     execute_cmd "ls -la /volume1/" "storage_volume1_structure.txt" "Structure /volume1"
-    execute_cmd "du -sh /volume1/*" "storage_volume1_sizes.txt" "Tailles dossiers /volume1"
-    execute_cmd "find /volume1 -maxdepth 1 -type d -exec du -sh {} \;" "storage_volume1_detailed.txt" "Détail tailles /volume1"
     
-    # Compter les fichiers par dossier
+    # Seulement la taille totale de /volume1 (rapide)
+    execute_cmd "du -sh /volume1" "storage_volume1_total.txt" "Taille totale /volume1"
+    
+    # Compter seulement les dossiers principaux (niveau 1)
     if [ -d /volume1 ]; then
-        print_status "Comptage des fichiers..."
+        print_status "Comptage rapide des dossiers principaux..."
         for dir in /volume1/*/; do
             if [ -d "$dir" ]; then
                 dirname=$(basename "$dir")
-                filecount=$(find "$dir" -type f 2>/dev/null | wc -l)
-                echo "$dirname: $filecount fichiers" >> "$AUDIT_DIR/storage_file_counts.txt"
+                echo "$dirname: dossier détecté" >> "$AUDIT_DIR/storage_folders_detected.txt"
+            fi
+        done 2>/dev/null
+        print_success "Dossiers détectés -> storage_folders_detected.txt"
+    fi
+}
+
+# Collecte stockage - TAILLES PRINCIPALES SEULEMENT
+collect_storage_info_sizes_only() {
+    print_status "=== COLLECTE TAILLES PRINCIPALES ==="
+    
+    # Utiliser timeout pour éviter les blocages
+    execute_cmd "timeout 300 du -sh /volume1/* 2>/dev/null || echo 'Timeout - calcul partiel'" "storage_volume1_sizes.txt" "Tailles dossiers /volume1 (avec timeout)"
+    
+    # Top 10 des plus gros dossiers (rapide)
+    if [ -d /volume1 ]; then
+        print_status "Identification des plus gros dossiers..."
+        timeout 180 find /volume1 -maxdepth 2 -type d -exec du -sh {} \; 2>/dev/null | sort -hr | head -20 > "$AUDIT_DIR/storage_top_folders.txt"
+        print_success "Top dossiers -> storage_top_folders.txt"
+    fi
+}
+
+# Collecte stockage - VERSION DÉTAILLÉE (longue)
+collect_storage_info_detailed() {
+    print_status "=== COLLECTE STOCKAGE DÉTAILLÉE (peut prendre du temps) ==="
+    
+    execute_cmd "timeout 600 du -sh /volume1/*" "storage_volume1_sizes_detailed.txt" "Tailles détaillées /volume1"
+    execute_cmd "timeout 300 find /volume1 -maxdepth 1 -type d -exec du -sh {} \;" "storage_volume1_breakdown.txt" "Répartition détaillée /volume1"
+    
+    # Compter les fichiers par dossier avec timeout
+    if [ -d /volume1 ]; then
+        print_status "Comptage détaillé des fichiers (long)..."
+        for dir in /volume1/*/; do
+            if [ -d "$dir" ]; then
+                dirname=$(basename "$dir")
+                print_status "Comptage: $dirname..."
+                filecount=$(timeout 60 find "$dir" -type f 2>/dev/null | wc -l)
+                if [ $? -eq 124 ]; then
+                    echo "$dirname: >timeout (beaucoup de fichiers)" >> "$AUDIT_DIR/storage_file_counts_detailed.txt"
+                else
+                    echo "$dirname: $filecount fichiers" >> "$AUDIT_DIR/storage_file_counts_detailed.txt"
+                fi
             fi
         done
-        print_success "Comptage fichiers -> storage_file_counts.txt"
+        print_success "Comptage détaillé -> storage_file_counts_detailed.txt"
     fi
+    
+    # Analyse des types de fichiers (échantillon)
+    print_status "Analyse types de fichiers (échantillon)..."
+    timeout 120 find /volume1 -type f -name "*.*" 2>/dev/null | sed 's/.*\.//' | sort | uniq -c | sort -nr | head -20 > "$AUDIT_DIR/storage_file_types.txt"
+    print_success "Types de fichiers -> storage_file_types.txt"
 }
 
 # Collecte des informations réseau
@@ -185,39 +236,42 @@ collect_packages_info() {
     
     # Packages installés
     if [ -d /var/packages ]; then
-        execute_cmd "ls -la /var/packages/" "packages_list.txt" "Liste packages"
-        execute_cmd "find /var/packages -name 'INFO' -exec basename \$(dirname {}) \; | sort" "packages_names.txt" "Noms packages"
+        execute_cmd "ls -la /var/packages/" "packages_list.txt" "Liste packages" 10
+        execute_cmd "find /var/packages -name 'INFO' -exec basename \$(dirname {}) \; | sort" "packages_names.txt" "Noms packages" 30
         
-        # Détail des packages
+        # Détail des packages (rapide)
+        print_status "Collecte détails packages..."
         for pkg in /var/packages/*/; do
             if [ -f "$pkg/INFO" ]; then
                 pkg_name=$(basename "$pkg")
-                cat "$pkg/INFO" >> "$AUDIT_DIR/packages_details.txt"
                 echo "=== $pkg_name ===" >> "$AUDIT_DIR/packages_details.txt"
+                cat "$pkg/INFO" >> "$AUDIT_DIR/packages_details.txt" 2>/dev/null
+                echo "" >> "$AUDIT_DIR/packages_details.txt"
             fi
         done
         print_success "Détails packages -> packages_details.txt"
     fi
     
-    # Docker si présent
+    # Docker si présent (avec timeout court)
     if command -v docker >/dev/null 2>&1; then
-        execute_cmd "docker ps -a" "docker_containers.txt" "Conteneurs Docker"
-        execute_cmd "docker images" "docker_images.txt" "Images Docker"
-        execute_cmd "docker version" "docker_version.txt" "Version Docker"
+        execute_cmd "docker ps -a" "docker_containers.txt" "Conteneurs Docker" 15
+        execute_cmd "docker images" "docker_images.txt" "Images Docker" 15
+        execute_cmd "docker version" "docker_version.txt" "Version Docker" 5
     fi
 }
 
 # Collecte des logs
 collect_logs() {
-    print_status "=== COLLECTE LOGS SYSTÈME ==="
+    print_status "=== COLLECTE LOGS SYSTÈME (échantillon) ==="
     
-    execute_cmd "tail -1000 /var/log/messages" "logs_messages.txt" "Messages système"
-    execute_cmd "dmesg | tail -500" "logs_dmesg.txt" "Messages noyau"
+    execute_cmd "tail -500 /var/log/messages" "logs_messages.txt" "Messages système récents" 30
+    execute_cmd "dmesg | tail -200" "logs_dmesg.txt" "Messages noyau récents" 10
     
     # Logs Synology spécifiques
     if [ -d /var/log/synolog ]; then
-        execute_cmd "ls -la /var/log/synolog/" "logs_synology_list.txt" "Logs Synology disponibles"
-        execute_cmd "tail -500 /var/log/synolog/*.log" "logs_synology_recent.txt" "Logs Synology récents"
+        execute_cmd "ls -la /var/log/synolog/" "logs_synology_list.txt" "Logs Synology disponibles" 5
+        # Seulement un échantillon des logs les plus récents
+        execute_cmd "find /var/log/synolog -name '*.log' -exec tail -100 {} \;" "logs_synology_sample.txt" "Échantillon logs Synology" 60
     fi
 }
 
@@ -265,15 +319,29 @@ EOF
         echo "" >> "$REPORT_FILE"
     fi
     
+    if [ -f "$AUDIT_DIR/storage_volume1_total.txt" ]; then
+        echo "=== Taille totale /volume1 ===" >> "$REPORT_FILE"
+        cat "$AUDIT_DIR/storage_volume1_total.txt" >> "$REPORT_FILE"
+        echo "" >> "$REPORT_FILE"
+    fi
+    
     if [ -f "$AUDIT_DIR/storage_volume1_sizes.txt" ]; then
-        echo "=== Tailles /volume1 ===" >> "$REPORT_FILE"
+        echo "=== Tailles dossiers /volume1 ===" >> "$REPORT_FILE"
         cat "$AUDIT_DIR/storage_volume1_sizes.txt" >> "$REPORT_FILE"
+        echo "" >> "$REPORT_FILE"
+    elif [ -f "$AUDIT_DIR/storage_top_folders.txt" ]; then
+        echo "=== Top 10 plus gros dossiers ===" >> "$REPORT_FILE"
+        head -10 "$AUDIT_DIR/storage_top_folders.txt" >> "$REPORT_FILE"
         echo "" >> "$REPORT_FILE"
     fi
     
     if [ -f "$AUDIT_DIR/storage_file_counts.txt" ]; then
         echo "=== Nombre de fichiers ===" >> "$REPORT_FILE"
         cat "$AUDIT_DIR/storage_file_counts.txt" >> "$REPORT_FILE"
+        echo "" >> "$REPORT_FILE"
+    elif [ -f "$AUDIT_DIR/storage_folders_detected.txt" ]; then
+        echo "=== Dossiers détectés ===" >> "$REPORT_FILE"
+        cat "$AUDIT_DIR/storage_folders_detected.txt" >> "$REPORT_FILE"
         echo "" >> "$REPORT_FILE"
     fi
     
@@ -345,24 +413,66 @@ create_archive() {
 main() {
     echo -e "${BLUE}"
     echo "=========================================="
-    echo "  AUDIT COMPLET SYNOLOGY RS814+"
-    echo "  Version: 1.0"
+    echo "  AUDIT RAPIDE SYNOLOGY RS814+"
+    echo "  Version: 1.1 - Optimisé"
     echo "  Date: $(date)"
     echo "=========================================="
     echo -e "${NC}"
+    echo ""
+    echo -e "${GREEN}⏱️  TEMPS ESTIMÉS:${NC}"
+    echo -e "   Phase 1 (Critiques):     ${YELLOW}2-3 minutes${NC}"
+    echo -e "   Phase 2 (Importantes):   ${YELLOW}1-2 minutes${NC}"
+    echo -e "   Phase 3 (Stockage):      ${YELLOW}30 sec - 30 min (au choix)${NC}"
+    echo -e "   Phase 4 (Logs):          ${YELLOW}30 secondes${NC}"
+    echo ""
+    echo -e "${GREEN}📊 L'audit s'adapte à vos besoins:${NC}"
+    echo -e "   • ${GREEN}Rapide${NC}: Infos essentielles seulement (5 min)"
+    echo -e "   • ${YELLOW}Standard${NC}: + tailles principales (10 min)"  
+    echo -e "   • ${RED}Complet${NC}: + analyse détaillée (30+ min)"
+    echo ""
+    read -p "Appuyez sur Entrée pour continuer..."
+    echo ""
     
     check_prerequisites
     create_audit_directory
     
+    # PHASE 1: Infos critiques et rapides (1-2 minutes)
+    print_status "=== PHASE 1: INFORMATIONS CRITIQUES (rapide) ==="
     collect_system_info
-    collect_hardware_info
-    collect_storage_info
-    collect_network_info
     collect_user_info
     collect_services_info
+    collect_network_info
+    
+    # PHASE 2: Infos importantes (2-3 minutes)
+    print_status "=== PHASE 2: INFORMATIONS IMPORTANTES ==="
+    collect_hardware_info
     collect_packages_info
-    collect_logs
     collect_configs
+    
+    # PHASE 3: Stockage rapide puis détaillé (optionnel)
+    print_status "=== PHASE 3: INFORMATIONS STOCKAGE ==="
+    collect_storage_info_fast
+    
+    echo ""
+    echo -e "${YELLOW}Voulez-vous continuer avec l'analyse DÉTAILLÉE du stockage ? (peut prendre 10-30 min)${NC}"
+    echo -e "${YELLOW}[O]ui / [N]on / [S]eulement tailles principales${NC}"
+    read -t 30 -p "Choix (défaut: S): " storage_choice
+    storage_choice=${storage_choice:-S}
+    
+    case "$storage_choice" in
+        [Oo]|[Oo]ui)
+            collect_storage_info_detailed
+            ;;
+        [Ss]|[Ss]eulement)
+            collect_storage_info_sizes_only
+            ;;
+        *)
+            print_status "Analyse détaillée du stockage ignorée"
+            ;;
+    esac
+    
+    # PHASE 4: Logs (rapide)
+    collect_logs
     
     generate_report
     create_archive
