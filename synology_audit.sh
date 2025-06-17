@@ -43,6 +43,32 @@ section() {
     echo -e "${CYAN}${BOLD}=== $1 ===${NC}" | tee -a "$LOGFILE"
 }
 
+# Fonction pour vérifier et exécuter une commande avec alternative
+safe_command() {
+    local cmd="$1"
+    local alternative="$2"
+    local description="$3"
+    
+    if command -v "$cmd" &> /dev/null; then
+        return 0
+    else
+        if [ -n "$alternative" ]; then
+            echo "Commande '$cmd' non disponible - $description"
+            eval "$alternative"
+        else
+            echo "Commande '$cmd' non disponible sur ce système"
+        fi
+        return 1
+    fi
+}
+
+# Fonction pour extraire le port d'une ligne netstat de manière portable
+extract_port() {
+    local line="$1"
+    # Méthode compatible sans rev
+    echo "$line" | awk '{print $4}' | sed 's/.*://'
+}
+
 # Initialisation de l'audit
 init_audit() {
     mkdir -p "$AUDIT_DIR"
@@ -50,6 +76,22 @@ init_audit() {
     log "Hostname: $HOSTNAME"
     log "Date: $DATE"
     log "Répertoire audit: $AUDIT_DIR"
+    
+    # Vérification des commandes optionnelles
+    local missing_commands=()
+    local optional_commands=("last" "rev" "smartctl" "docker" "systemctl" "iptables" "synouser")
+    
+    for cmd in "${optional_commands[@]}"; do
+        if ! command -v "$cmd" &> /dev/null; then
+            missing_commands+=("$cmd")
+        fi
+    done
+    
+    if [ ${#missing_commands[@]} -gt 0 ]; then
+        warning "Commandes optionnelles non disponibles: ${missing_commands[*]}"
+        info "L'audit continuera avec les alternatives disponibles"
+    fi
+    
     echo ""
 }
 
@@ -198,7 +240,8 @@ audit_services() {
         echo "-------   --------  -----------    ---------"
         if command -v netstat &> /dev/null; then
             netstat -tulpn 2>/dev/null | grep LISTEN | while read line; do
-                port=$(echo "$line" | awk '{print $4}' | rev | cut -d: -f1 | rev)
+                # Extraction du port de manière portable
+                port=$(extract_port "$line")
                 protocol=$(echo "$line" | awk '{print $1}')
                 process=$(echo "$line" | awk '{print $7}' | cut -d/ -f2 2>/dev/null || echo "unknown")
                 
@@ -483,19 +526,28 @@ audit_storage() {
         echo ""
         
         echo "=== SANTÉ DES DISQUES (SMART) ==="
-        for disk in /dev/sd[a-z] /dev/nvme[0-9]n[0-9]; do
-            if [ -b "$disk" ]; then
-                echo ""
-                echo "=== SMART $disk ==="
-                if command -v smartctl &> /dev/null; then
-                    smartctl -i "$disk" 2>/dev/null | grep -E "(Model|Serial|Firmware)" || echo "Informations non disponibles"
-                    smartctl -H "$disk" 2>/dev/null || echo "Test santé non disponible"
+        if command -v smartctl &> /dev/null; then
+            for disk in /dev/sd[a-z] /dev/nvme[0-9]n[0-9]; do
+                if [ -b "$disk" ]; then
+                    echo ""
+                    echo "=== SMART $disk ==="
+                    smartctl -i "$disk" 2>/dev/null | grep -E "(Model|Serial|Firmware)" || echo "Informations de base non disponibles"
+                    smartctl -H "$disk" 2>/dev/null || echo "Test de santé non disponible"
                     smartctl -a "$disk" 2>/dev/null | grep -E "(Temperature|Power_On_Hours|Reallocated_Sector|Current_Pending_Sector)" || echo "Attributs SMART non disponibles"
-                else
-                    echo "smartctl non disponible"
                 fi
+            done
+        else
+            echo "smartctl non disponible - utilisation d'alternatives basiques"
+            echo ""
+            echo "Disques détectés:"
+            ls -la /dev/sd[a-z] 2>/dev/null || echo "Aucun disque SATA détecté"
+            echo ""
+            echo "Informations basiques disques:"
+            if [ -f /proc/diskstats ]; then
+                echo "Statistiques disques (depuis /proc/diskstats):"
+                grep -E "(sd[a-z]|nvme)" /proc/diskstats | head -10
             fi
-        done
+        fi
         
     } > "$output"
     
