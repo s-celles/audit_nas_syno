@@ -62,13 +62,6 @@ safe_command() {
     fi
 }
 
-# Fonction pour extraire le port d'une ligne netstat de manière portable
-extract_port() {
-    local line="$1"
-    # Méthode compatible sans rev
-    echo "$line" | awk '{print $4}' | sed 's/.*://'
-}
-
 # Initialisation de l'audit
 init_audit() {
     mkdir -p "$AUDIT_DIR"
@@ -79,7 +72,7 @@ init_audit() {
     
     # Vérification des commandes optionnelles
     local missing_commands=()
-    local optional_commands=("last" "rev" "smartctl" "docker" "systemctl" "iptables" "synouser")
+    local optional_commands=("smartctl" "docker" "systemctl" "iptables" "synouser" "lsblk")
     
     for cmd in "${optional_commands[@]}"; do
         if ! command -v "$cmd" &> /dev/null; then
@@ -240,8 +233,8 @@ audit_services() {
         echo "-------   --------  -----------    ---------"
         if command -v netstat &> /dev/null; then
             netstat -tulpn 2>/dev/null | grep LISTEN | while read line; do
-                # Extraction du port de manière portable
-                port=$(extract_port "$line")
+                # Extraction du port sans utiliser rev
+                port=$(echo "$line" | awk '{print $4}' | awk -F: '{print $NF}')
                 protocol=$(echo "$line" | awk '{print $1}')
                 process=$(echo "$line" | awk '{print $7}' | cut -d/ -f2 2>/dev/null || echo "unknown")
                 
@@ -479,7 +472,13 @@ audit_storage() {
         if command -v lsblk &> /dev/null; then
             lsblk
         else
-            echo "lsblk non disponible"
+            echo "lsblk non disponible - utilisation d'alternatives:"
+            echo ""
+            echo "Périphériques de stockage détectés:"
+            ls -la /dev/sd[a-z] 2>/dev/null || echo "Aucun disque SATA détecté"
+            echo ""
+            echo "Partitions montées:"
+            mount | grep -E "(sd|volume)" || echo "Aucune partition de stockage détectée"
         fi
         echo ""
         
@@ -612,7 +611,19 @@ audit_applications() {
         
         echo "=== PORTS APPLICATIONS ==="
         echo "Ports d'applications courantes ouverts:"
-        netstat -tulpn 2>/dev/null | grep -E ":(8080|9000|32400|5000|8096|3000|8000|8443)" || echo "Aucun port d'application standard ouvert"
+        if command -v netstat &> /dev/null; then
+            netstat -tulpn 2>/dev/null | grep LISTEN | while read line; do
+                port=$(echo "$line" | awk '{print $4}' | awk -F: '{print $NF}')
+                case "$port" in
+                    8080|9000|32400|5000|8096|3000|8000|8443)
+                        process=$(echo "$line" | awk '{print $7}' | cut -d/ -f2 || echo "unknown")
+                        echo "  Port $port ($process)"
+                        ;;
+                esac
+            done || echo "Aucun port d'application standard ouvert"
+        else
+            echo "netstat non disponible"
+        fi
         echo ""
         
         echo "=== SERVICES SYSTÈME ACTIFS ==="
