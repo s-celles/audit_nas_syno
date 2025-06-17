@@ -1,4 +1,64 @@
-#!/bin/bash
+# Fonction pour créer des fichiers markdown formatés
+create_markdown_file() {
+    local filename="$1"
+    local title="$2"
+    local content="$3"
+    
+    cat > "$AUDIT_DIR/$filename" << EOF
+# $title
+
+**Date de génération:** $(date)  
+**Hostname:** $(hostname)  
+**Système:** $(cat /proc/version 2>/dev/null | cut -d' ' -f1-3)
+
+---
+
+$content
+
+---
+
+*Généré automatiquement par l'audit Synology RS814+*
+EOF
+}
+
+# Fonction pour formater les informations système en markdown
+format_system_info_md() {
+    if [ -f "$AUDIT_DIR/synoinfo.conf.md" ]; then
+        local synology_model=$(grep "^productversion=" /etc/synoinfo.conf 2>/dev/null | cut -d'"' -f2)
+        local synology_build=$(grep "^buildnumber=" /etc/synoinfo.conf 2>/dev/null | cut -d'"' -f2)
+        
+        cat > "$AUDIT_DIR/system_summary.md" << EOF
+# Résumé Système Synology
+
+## 📋 Informations Générales
+
+| Propriété | Valeur |
+|-----------|--------|
+| **Modèle** | RS814+ |
+| **Version DSM** | $synology_model |
+| **Build** | $synology_build |
+| **Hostname** | $(hostname) |
+| **Uptime** | $(uptime | cut -d',' -f1) |
+| **Date audit** | $(date) |
+
+## 🖥️ Système
+
+$(cat /proc/version 2>/dev/null)
+
+## 💾 Mémoire
+
+\`\`\`
+$(free -h 2>/dev/null)
+\`\`\`
+
+## 🔧 Processeur
+
+$(grep "model name" /proc/cpuinfo 2>/dev/null | head -1 | cut -d':' -f2 | sed 's/^ *//')
+
+EOF
+        print_success "Résumé système -> system_summary.md"
+    fi
+}#!/bin/bash
 
 # =================================================================
 # Script d'audit complet Synology RS814+ pour migration UGREEN
@@ -38,24 +98,54 @@ print_error() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $1" >> "$AUDIT_DIR/$LOG_FILE"
 }
 
-# Fonction pour exécuter une commande avec gestion d'erreur et timeout
+# Fonction pour exécuter une commande avec gestion d'erreur et timeout + formatage markdown
 execute_cmd() {
     local cmd="$1"
     local output_file="$2"
     local description="$3"
     local timeout_sec="${4:-60}"  # Timeout par défaut: 60 secondes
+    local md_title="$5"  # Titre markdown optionnel
     
     print_status "Collecte: $description"
     
+    # Créer fichier markdown avec en-tête
+    local md_file="${output_file%.txt}.md"
+    
+    cat > "$AUDIT_DIR/$md_file" << EOF
+# $description
+
+**Date:** $(date)  
+**Commande:** \`$cmd\`  
+**Timeout:** ${timeout_sec}s
+
+---
+
+EOF
+    
     # Utiliser timeout pour éviter les blocages
-    if timeout "$timeout_sec" bash -c "$cmd" > "$AUDIT_DIR/$output_file" 2>/dev/null; then
-        print_success "$description -> $output_file"
+    if timeout "$timeout_sec" bash -c "$cmd" >> "$AUDIT_DIR/$md_file" 2>/dev/null; then
+        echo "" >> "$AUDIT_DIR/$md_file"
+        echo "---" >> "$AUDIT_DIR/$md_file"
+        echo "*Collecte réussie*" >> "$AUDIT_DIR/$md_file"
+        print_success "$description -> $md_file"
     elif [ $? -eq 124 ]; then
         print_warning "Timeout ($timeout_sec s): $description"
-        echo "TIMEOUT: Commande trop longue ($cmd)" > "$AUDIT_DIR/$output_file"
+        cat >> "$AUDIT_DIR/$md_file" << EOF
+
+⚠️ **TIMEOUT**
+- Commande trop longue (${timeout_sec}s)
+- Résultats partiels possibles
+
+EOF
     else
         print_warning "Échec: $description"
-        echo "ERREUR: Impossible d'exécuter $cmd" > "$AUDIT_DIR/$output_file"
+        cat >> "$AUDIT_DIR/$md_file" << EOF
+
+❌ **ERREUR**
+- Impossible d'exécuter la commande
+- Vérifier les permissions ou la syntaxe
+
+EOF
     fi
 }
 
@@ -102,12 +192,15 @@ create_audit_directory() {
 collect_system_info() {
     print_status "=== COLLECTE INFORMATIONS SYSTÈME ==="
     
-    execute_cmd "cat /etc/synoinfo.conf" "synoinfo.conf" "Configuration Synology"
+    execute_cmd "cat /etc/synoinfo.conf" "synoinfo.txt" "Configuration Synology"
     execute_cmd "uname -a" "system_uname.txt" "Informations noyau"
     execute_cmd "cat /proc/version" "system_version.txt" "Version système"
     execute_cmd "uptime" "system_uptime.txt" "Uptime système"
     execute_cmd "date" "system_date.txt" "Date et heure système"
     execute_cmd "hostname" "system_hostname.txt" "Nom d'hôte"
+    
+    # Créer un résumé système formaté
+    format_system_info_md
 }
 
 # Collecte des informations matériel
@@ -129,21 +222,73 @@ collect_storage_info_fast() {
     execute_cmd "df -h" "storage_df.txt" "Espace disque"
     execute_cmd "cat /proc/mdstat" "storage_raid.txt" "Statut RAID"
     execute_cmd "ls -la /volume1/" "storage_volume1_structure.txt" "Structure /volume1"
-    
-    # Seulement la taille totale de /volume1 (rapide)
     execute_cmd "du -sh /volume1" "storage_volume1_total.txt" "Taille totale /volume1"
     
-    # Compter seulement les dossiers principaux (niveau 1)
+    # Créer un résumé stockage formaté en markdown
+    create_storage_summary_md
+}
+
+# Fonction pour créer un résumé du stockage en markdown
+create_storage_summary_md() {
+    print_status "Génération résumé stockage..."
+    
+    cat > "$AUDIT_DIR/storage_summary.md" << EOF
+# 💾 Résumé Stockage Synology
+
+## 📊 Espace Disque Global
+
+\`\`\`
+$(df -h 2>/dev/null)
+\`\`\`
+
+## 🔧 Statut RAID
+
+\`\`\`
+$(cat /proc/mdstat 2>/dev/null)
+\`\`\`
+
+## 📁 Structure /volume1
+
+| Élément | Type | Permissions | Taille | Modifié |
+|---------|------|-------------|--------|---------|
+EOF
+
+    # Ajouter les détails de /volume1 dans un tableau
     if [ -d /volume1 ]; then
-        print_status "Comptage rapide des dossiers principaux..."
-        for dir in /volume1/*/; do
-            if [ -d "$dir" ]; then
-                dirname=$(basename "$dir")
-                echo "$dirname: dossier détecté" >> "$AUDIT_DIR/storage_folders_detected.txt"
+        ls -la /volume1/ 2>/dev/null | tail -n +2 | while read line; do
+            if [ ! -z "$line" ]; then
+                permissions=$(echo "$line" | awk '{print $1}')
+                type=$(echo "$line" | awk '{print $1}' | cut -c1)
+                name=$(echo "$line" | awk '{print $NF}')
+                size=$(echo "$line" | awk '{print $5}')
+                date=$(echo "$line" | awk '{print $6" "$7" "$8}')
+                
+                case $type in
+                    d) type_desc="📁 Dossier" ;;
+                    l) type_desc="🔗 Lien" ;;
+                    *) type_desc="📄 Fichier" ;;
+                esac
+                
+                echo "| $name | $type_desc | \`$permissions\` | $size | $date |" >> "$AUDIT_DIR/storage_summary.md"
             fi
-        done 2>/dev/null
-        print_success "Dossiers détectés -> storage_folders_detected.txt"
+        done
     fi
+    
+    cat >> "$AUDIT_DIR/storage_summary.md" << EOF
+
+## 📦 Taille Totale /volume1
+
+$(du -sh /volume1 2>/dev/null)
+
+## 🎯 Points Clés pour Migration
+
+- ✅ **Espace total utilisé:** $(du -sh /volume1 2>/dev/null | awk '{print $1}')
+- ✅ **Structure préservée:** $(ls -1 /volume1/ 2>/dev/null | wc -l) dossiers principaux
+- ✅ **RAID fonctionnel:** $(grep -c "active" /proc/mdstat 2>/dev/null) array(s) actif(s)
+
+EOF
+
+    print_success "Résumé stockage -> storage_summary.md"
 }
 
 # Collecte stockage - TAILLES PRINCIPALES SEULEMENT
@@ -211,9 +356,78 @@ collect_user_info() {
     execute_cmd "cat /etc/group" "users_groups.txt" "Liste groupes"
     execute_cmd "cat /etc/shadow" "users_shadow.txt" "Mots de passe (hash)"
     execute_cmd "ls -la /volume1/homes/" "users_homes.txt" "Dossiers utilisateurs"
-    
-    # Permissions spéciales
     execute_cmd "getfacl /volume1/* 2>/dev/null || echo 'ACL non supporté'" "users_acl.txt" "ACL dossiers"
+    
+    # Créer un résumé utilisateurs formaté
+    create_users_summary_md
+}
+
+# Fonction pour créer un résumé des utilisateurs en markdown
+create_users_summary_md() {
+    print_status "Génération résumé utilisateurs..."
+    
+    cat > "$AUDIT_DIR/users_summary.md" << EOF
+# 👥 Résumé Utilisateurs & Groupes
+
+## 🔐 Utilisateurs Système
+
+| Utilisateur | UID | GID | Shell | Répertoire | Commentaire |
+|-------------|-----|-----|-------|------------|-------------|
+EOF
+
+    # Ajouter les utilisateurs dans un tableau (filtrer les utilisateurs système utiles)
+    grep -E "(admin|root|users|homes)" /etc/passwd 2>/dev/null | while IFS=: read username password uid gid comment home shell; do
+        echo "| $username | $uid | $gid | \`$shell\` | $home | $comment |" >> "$AUDIT_DIR/users_summary.md"
+    done
+    
+    cat >> "$AUDIT_DIR/users_summary.md" << EOF
+
+## 👪 Groupes Importants
+
+| Groupe | GID | Membres |
+|--------|-----|---------|
+EOF
+
+    # Ajouter les groupes importants
+    grep -E "(admin|users|everyone)" /etc/group 2>/dev/null | while IFS=: read groupname password gid members; do
+        echo "| $groupname | $gid | $members |" >> "$AUDIT_DIR/users_summary.md"
+    done
+    
+    cat >> "$AUDIT_DIR/users_summary.md" << EOF
+
+## 🏠 Dossiers Utilisateurs (/volume1/homes)
+
+EOF
+
+    if [ -d /volume1/homes ]; then
+        echo "| Utilisateur | Taille | Permissions | Dernière Modif |" >> "$AUDIT_DIR/users_summary.md"
+        echo "|-------------|--------|-------------|----------------|" >> "$AUDIT_DIR/users_summary.md"
+        
+        for userdir in /volume1/homes/*/; do
+            if [ -d "$userdir" ]; then
+                username=$(basename "$userdir")
+                size=$(du -sh "$userdir" 2>/dev/null | awk '{print $1}')
+                perms=$(ls -ld "$userdir" 2>/dev/null | awk '{print $1}')
+                modif=$(ls -ld "$userdir" 2>/dev/null | awk '{print $6" "$7" "$8}')
+                echo "| $username | $size | \`$perms\` | $modif |" >> "$AUDIT_DIR/users_summary.md"
+            fi
+        done
+    else
+        echo "*Aucun dossier /volume1/homes détecté*" >> "$AUDIT_DIR/users_summary.md"
+    fi
+    
+    cat >> "$AUDIT_DIR/users_summary.md" << EOF
+
+## 🎯 Points Clés pour Migration
+
+- ✅ **Comptes à recréer:** $(grep -E "(admin|users)" /etc/passwd 2>/dev/null | wc -l) utilisateurs
+- ⚠️  **Mots de passe:** Seront à redéfinir (hashes non portables)
+- ✅ **Groupes importants:** $(grep -E "(admin|users|everyone)" /etc/group 2>/dev/null | wc -l) groupes
+- 📁 **Dossiers homes:** $(ls -1 /volume1/homes/ 2>/dev/null | wc -l) utilisateurs avec dossier
+
+EOF
+
+    print_success "Résumé utilisateurs -> users_summary.md"
 }
 
 # Collecte des informations services
@@ -298,89 +512,254 @@ collect_configs() {
 generate_report() {
     print_status "=== GÉNÉRATION RAPPORT FINAL ==="
     
-    REPORT_FILE="$AUDIT_DIR/RAPPORT_AUDIT.txt"
+    local REPORT_FILE="$AUDIT_DIR/RAPPORT_AUDIT.md"
+    local hostname=$(hostname)
+    local dsm_version=$(grep "^productversion=" /etc/synoinfo.conf 2>/dev/null | cut -d'"' -f2)
+    local total_size=$(du -sh /volume1 2>/dev/null | awk '{print $1}')
     
     cat > "$REPORT_FILE" << EOF
-========================================
-RAPPORT D'AUDIT SYNOLOGY RS814+
-========================================
-Date: $(date)
-Hostname: $(hostname)
-Système: $(cat /proc/version 2>/dev/null || echo "Inconnu")
+# 📋 RAPPORT D'AUDIT SYNOLOGY RS814+
 
-========================================
-RÉSUMÉ STOCKAGE
-========================================
+![Synology](https://img.shields.io/badge/Synology-RS814+-blue)
+![DSM](https://img.shields.io/badge/DSM-$dsm_version-green)
+![Date](https://img.shields.io/badge/Date-$(date +%Y%m%d)-orange)
+
+---
+
+## 📊 Vue d'Ensemble
+
+| 🏷️ **Propriété** | 📝 **Valeur** |
+|------------------|---------------|
+| **Modèle NAS** | Synology RS814+ |
+| **Hostname** | $hostname |
+| **Version DSM** | $dsm_version |
+| **Date audit** | $(date) |
+| **Uptime** | $(uptime | cut -d',' -f1 | sed 's/up //') |
+| **Taille totale** | $total_size |
+
+---
+
+## 💾 RÉSUMÉ STOCKAGE
+
+### 📈 Espace Disque
+\`\`\`
+$(df -h 2>/dev/null | head -1)
+$(df -h 2>/dev/null | grep volume)
+\`\`\`
+
+### 🔧 Statut RAID
 EOF
-    
-    if [ -f "$AUDIT_DIR/storage_df.txt" ]; then
-        echo "=== Espace disque ===" >> "$REPORT_FILE"
-        cat "$AUDIT_DIR/storage_df.txt" >> "$REPORT_FILE"
+
+    if [ -f "$AUDIT_DIR/storage_raid.md" ]; then
+        echo "✅ **RAID Status:** $(grep -c "active" /proc/mdstat 2>/dev/null) array(s) actif(s)" >> "$REPORT_FILE"
         echo "" >> "$REPORT_FILE"
+        echo "\`\`\`" >> "$REPORT_FILE"
+        cat /proc/mdstat 2>/dev/null | head -10 >> "$REPORT_FILE"
+        echo "\`\`\`" >> "$REPORT_FILE"
     fi
     
-    if [ -f "$AUDIT_DIR/storage_volume1_total.txt" ]; then
-        echo "=== Taille totale /volume1 ===" >> "$REPORT_FILE"
-        cat "$AUDIT_DIR/storage_volume1_total.txt" >> "$REPORT_FILE"
-        echo "" >> "$REPORT_FILE"
+    cat >> "$REPORT_FILE" << EOF
+
+### 📁 Structure /volume1
+
+| Dossier | Taille | Description |
+|---------|--------|-------------|
+EOF
+
+    # Ajouter les tailles si disponibles
+    if [ -f "$AUDIT_DIR/storage_volume1_sizes.md" ]; then
+        du -sh /volume1/* 2>/dev/null | while read size path; do
+            folder=$(basename "$path")
+            case $folder in
+                "homes") desc="🏠 Dossiers utilisateurs" ;;
+                "public") desc="🌐 Partage public" ;;
+                "photo") desc="📸 Photos" ;;
+                "music") desc="🎵 Musique" ;;
+                "video") desc="🎬 Vidéos" ;;
+                "documents") desc="📄 Documents" ;;
+                *) desc="📁 Données" ;;
+            esac
+            echo "| $folder | $size | $desc |" >> "$REPORT_FILE"
+        done
+    elif [ -f "$AUDIT_DIR/storage_top_folders.md" ]; then
+        head -10 "$AUDIT_DIR/storage_top_folders.md" 2>/dev/null | while read size path; do
+            folder=$(basename "$path")
+            echo "| $folder | $size | 📁 Dossier |" >> "$REPORT_FILE"
+        done
+    else
+        # Fallback - liste simple
+        ls -1 /volume1/ 2>/dev/null | while read folder; do
+            echo "| $folder | - | 📁 Détecté |" >> "$REPORT_FILE"
+        done
     fi
     
-    if [ -f "$AUDIT_DIR/storage_volume1_sizes.txt" ]; then
-        echo "=== Tailles dossiers /volume1 ===" >> "$REPORT_FILE"
-        cat "$AUDIT_DIR/storage_volume1_sizes.txt" >> "$REPORT_FILE"
+    cat >> "$REPORT_FILE" << EOF
+
+---
+
+## 👥 RÉSUMÉ UTILISATEURS
+
+### 🔐 Comptes Utilisateurs
+EOF
+
+    if [ -f "$AUDIT_DIR/users_passwd.md" ]; then
+        local user_count=$(grep -E "(admin|users|homes)" /etc/passwd 2>/dev/null | wc -l)
+        echo "- 👤 **Utilisateurs détectés:** $user_count" >> "$REPORT_FILE"
+        echo "- 🏠 **Dossiers homes:** $(ls -1 /volume1/homes/ 2>/dev/null | wc -l)" >> "$REPORT_FILE"
         echo "" >> "$REPORT_FILE"
-    elif [ -f "$AUDIT_DIR/storage_top_folders.txt" ]; then
-        echo "=== Top 10 plus gros dossiers ===" >> "$REPORT_FILE"
-        head -10 "$AUDIT_DIR/storage_top_folders.txt" >> "$REPORT_FILE"
-        echo "" >> "$REPORT_FILE"
+        echo "| Utilisateur | UID | Shell | Répertoire |" >> "$REPORT_FILE"
+        echo "|-------------|-----|-------|------------|" >> "$REPORT_FILE"
+        grep -E "(admin|users)" /etc/passwd 2>/dev/null | head -10 | while IFS=: read username x uid gid x home shell; do
+            echo "| $username | $uid | \`$shell\` | $home |" >> "$REPORT_FILE"
+        done
     fi
     
-    if [ -f "$AUDIT_DIR/storage_file_counts.txt" ]; then
-        echo "=== Nombre de fichiers ===" >> "$REPORT_FILE"
-        cat "$AUDIT_DIR/storage_file_counts.txt" >> "$REPORT_FILE"
-        echo "" >> "$REPORT_FILE"
-    elif [ -f "$AUDIT_DIR/storage_folders_detected.txt" ]; then
-        echo "=== Dossiers détectés ===" >> "$REPORT_FILE"
-        cat "$AUDIT_DIR/storage_folders_detected.txt" >> "$REPORT_FILE"
+    cat >> "$REPORT_FILE" << EOF
+
+---
+
+## 🔧 RÉSUMÉ SERVICES
+
+### 🌐 Services Réseau Actifs
+EOF
+
+    if [ -f "$AUDIT_DIR/services_systemctl.md" ]; then
+        echo "- 🔒 **SSH:** $(systemctl is-active sshd 2>/dev/null || echo "Inconnu")" >> "$REPORT_FILE"
+        echo "- 📁 **SMB:** $(systemctl is-active smbd 2>/dev/null || echo "Inconnu")" >> "$REPORT_FILE"
+        echo "- 🌍 **HTTP:** $(systemctl is-active nginx 2>/dev/null || echo "Inconnu")" >> "$REPORT_FILE"
         echo "" >> "$REPORT_FILE"
     fi
     
     cat >> "$REPORT_FILE" << EOF
 
-========================================
-RÉSUMÉ UTILISATEURS
-========================================
+### 📱 Packages Installés
 EOF
-    
-    if [ -f "$AUDIT_DIR/users_passwd.txt" ]; then
-        echo "=== Utilisateurs système ===" >> "$REPORT_FILE"
-        grep -E "(admin|users|homes)" "$AUDIT_DIR/users_passwd.txt" >> "$REPORT_FILE" 2>/dev/null
+
+    if [ -d /var/packages ]; then
+        local pkg_count=$(ls -1 /var/packages/ 2>/dev/null | wc -l)
+        echo "- 📦 **Total packages:** $pkg_count installés" >> "$REPORT_FILE"
         echo "" >> "$REPORT_FILE"
+        echo "| Package | Status |" >> "$REPORT_FILE"
+        echo "|---------|--------|" >> "$REPORT_FILE"
+        ls -1 /var/packages/ 2>/dev/null | head -10 | while read pkg; do
+            status="✅ Installé"
+            echo "| $pkg | $status |" >> "$REPORT_FILE"
+        done
     fi
     
     cat >> "$REPORT_FILE" << EOF
 
-========================================
-RÉSUMÉ SERVICES
-========================================
+---
+
+## 🎯 CHECKLIST MIGRATION
+
+### ✅ Données Collectées
+- [x] Configuration système complète
+- [x] Liste des utilisateurs et groupes
+- [x] Structure des dossiers /volume1
+- [x] Services et packages installés
+- [x] Configuration réseau
+- [x] Statut RAID et stockage
+
+### 📋 Prochaines Étapes
+
+1. **🔧 Préparation DXP4800+**
+   - Configuration IP identique
+   - Création des utilisateurs
+   - Configuration des partages
+
+2. **📁 Migration des données**
+   - Taille totale à migrer: **$total_size**
+   - Méthode recommandée: rsync ou Hyper Backup
+   - Estimation temps: 8-24h selon débit réseau
+
+3. **⚙️ Configuration services**
+   - Reconfiguration SMB/CIFS
+   - Réinstallation packages critiques
+   - Tests de connectivité
+
+### 📞 Support
+
+- 📖 **Documentation complète:** Voir tous les fichiers .md générés
+- 🔍 **Détails techniques:** Consulter les fichiers individuels
+- ⚠️ **Points d'attention:** Vérifier users_summary.md et storage_summary.md
+
+---
+
+## 📁 FICHIERS GÉNÉRÉS
+
 EOF
+
+    echo "| Fichier | Description | Importance |" >> "$REPORT_FILE"
+    echo "|---------|-------------|------------|" >> "$REPORT_FILE"
     
-    if [ -f "$AUDIT_DIR/services_systemctl.txt" ]; then
-        echo "=== Services actifs ===" >> "$REPORT_FILE"
-        grep -i "active\|running" "$AUDIT_DIR/services_systemctl.txt" | head -20 >> "$REPORT_FILE" 2>/dev/null
-        echo "" >> "$REPORT_FILE"
-    fi
+    ls -la "$AUDIT_DIR/" | grep "\.md$" | while read line; do
+        filename=$(echo "$line" | awk '{print $NF}')
+        case $filename in
+            "*summary*") importance="🔥 Critique" ;;
+            "*storage*") importance="📊 Important" ;;
+            "*users*") importance="👥 Important" ;;
+            "*") importance="📋 Référence" ;;
+        esac
+        echo "| $filename | $(echo $filename | sed 's/_/ /g' | sed 's/.md//') | $importance |" >> "$REPORT_FILE"
+    done
     
     cat >> "$REPORT_FILE" << EOF
 
-========================================
-FICHIERS GÉNÉRÉS
-========================================
+---
+
+*📅 Rapport généré le $(date) par l'outil d'audit Synology RS814+*
+*🔄 Pour une migration vers UGREEN DXP4800 Plus*
 EOF
+
+    print_success "Rapport principal généré -> $REPORT_FILE"
     
-    ls -la "$AUDIT_DIR/" >> "$REPORT_FILE"
-    
-    print_success "Rapport généré -> $REPORT_FILE"
+    # Créer un index des fichiers
+    create_index_md
+}
+
+# Créer un index des fichiers markdown
+create_index_md() {
+    cat > "$AUDIT_DIR/INDEX.md" << EOF
+# 📑 INDEX DES FICHIERS D'AUDIT
+
+## 🎯 Fichiers Principaux (À consulter en priorité)
+
+1. **[📋 RAPPORT_AUDIT.md](./RAPPORT_AUDIT.md)** - Vue d'ensemble complète
+2. **[💾 storage_summary.md](./storage_summary.md)** - Résumé stockage et migration
+3. **[👥 users_summary.md](./users_summary.md)** - Utilisateurs et permissions
+4. **[🖥️ system_summary.md](./system_summary.md)** - Configuration système
+
+## 📊 Fichiers Détaillés
+
+### Stockage
+- [storage_df.md](./storage_df.md) - Espace disque détaillé
+- [storage_raid.md](./storage_raid.md) - Statut RAID complet
+- [storage_volume1_structure.md](./storage_volume1_structure.md) - Structure /volume1
+
+### Système & Services
+- [services_systemctl.md](./services_systemctl.md) - Services actifs
+- [network_interfaces.md](./network_interfaces.md) - Configuration réseau
+- [packages_list.md](./packages_list.md) - Applications installées
+
+### Utilisateurs & Sécurité
+- [users_passwd.md](./users_passwd.md) - Liste complète utilisateurs
+- [users_groups.md](./users_groups.md) - Groupes système
+- [users_acl.md](./users_acl.md) - Permissions avancées
+
+## 🔧 Guide d'Utilisation
+
+1. **Commencez par** RAPPORT_AUDIT.md pour la vue d'ensemble
+2. **Consultez** storage_summary.md pour planifier la migration
+3. **Vérifiez** users_summary.md pour recréer les comptes
+4. **Référez-vous** aux fichiers détaillés selon vos besoins
+
+---
+
+*Tous les fichiers sont au format Markdown (.md) pour une lecture optimale*
+EOF
+
+    print_success "Index créé -> INDEX.md"
 }
 
 # Création de l'archive finale
